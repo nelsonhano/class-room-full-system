@@ -1,124 +1,245 @@
-# Classroom Full-Stack: Known Issues and Remaining Work
+# Classroom Management System
 
-Status from a full local test run on 2026-11-11: every page was opened in a browser and every backend endpoint was called.
+A full-stack web app for running a school's academic structure: **departments**, the **subjects** they offer, the **classes** teachers run for those subjects, and the **students** enrolled in them.
 
-**Overall completion: roughly 35–40% (estimate).** The frontend shell, list pages and the class-create form exist. The database connection, authentication, most write endpoints and several pages are missing or broken.
+Admins and teachers use a dashboard to create and browse subjects and classes. Students join a class with its invite code.
 
-- **Frontend:** React 19 + Vite + Refine + Tailwind v4, at `frontend/`, port 5173
-- **Backend:** Express 5 + Drizzle ORM + Neon + Better Auth + Arcjet, at `backend/`, port 8000
+> **Project status:** in active development (roughly 35–40% complete). For the current bugs, missing endpoints and remaining work, see [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ---
 
-## 1. Blockers (nothing works end-to-end until these are fixed)
+## Table of contents
 
-- [ ] **Set a real database URL.** `DATABASE_URL` in `backend/.env` is still the template value (`postgresql://username:...@localhost:5432/database_name`), so every data endpoint returns `500`. The code uses the `drizzle-orm/neon-http` driver, which talks to Neon over HTTPS, so it needs a real **Neon** connection string. A plain local Postgres will not work unless you switch the driver (for example to `drizzle-orm/node-postgres`). After setting it, run `npm run db:migrate` in `backend/`.
-- [ ] **Add `BETTER_AUTH_SECRET`** to `backend/.env`. It is missing, and `POST /api/auth/sign-up/email` returns `500`.
-- [ ] **Add `ARCJET_ENV=development`** to `backend/.env` for local development. Without it Arcjet logs `Failed to build fingerprint` on every request (see 4.3).
-- [ ] **Make the frontend ignore PostCSS configs in parent folders.** Vite looks for a PostCSS config in parent directories. On a machine with a `postcss.config.js` above the project (for example in the user's home folder), it loads Tailwind v3 and the app shows only an error overlay (`@layer base is used but no matching @tailwind base directive`). The project uses `@tailwindcss/vite`, so add this to `frontend/vite.config.ts`:
-  ```ts
-  css: { postcss: {} },
-  ```
+- [Features](#features)
+- [Tech stack](#tech-stack)
+- [Architecture](#architecture)
+- [Data model](#data-model)
+- [API reference](#api-reference)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+- [Environment variables](#environment-variables)
+- [Scripts](#scripts)
+- [Deployment](#deployment)
+- [Roadmap](#roadmap)
 
-## 2. Frontend ↔ backend communication bugs
+---
 
-- [ ] **The teacher filter is dropped.** `useList({ resource: 'users', filters: [{ field: 'role', value: 'teacher' }] })` is sent as `GET /api/users?page=1&limit=100`, without `role=teacher`. `buildQueryParams` in `frontend/src/providers/data.ts` only handles `subjects` and `classes`. As a result, the Teacher dropdowns on Classes → List and Classes → Create show every user, students included. Fix: add a `users` branch that maps `role` → `params.role` and `name`/`email` → `params.search`.
-- [ ] **Backend error messages never reach the UI.** The backend responds with `{ error: "..." }`, but `buildHttpError` in `data.ts` reads `payload.message`, so every failure is shown as "Request failed." Either send `message` from the backend or read `payload.error ?? payload.message`.
-- [ ] **Errors on create and get-one are not handled.** In `data.ts`, the `create.mapResponse` and `getOne.mapResponse` functions never check `response.ok`, and they return `[]` when `data` is missing.
-- [ ] **There is no visible error state.** When a request fails, list pages show an endless spinner and the class details page stays on "Loading class details..." while Refine retries. Show an error message and a retry button.
-- [ ] **Sorting is ignored.** Pages send `sorters: [{ field: 'id', order: 'desc' }]`, but the data provider does not forward sorters and no backend route reads a sort parameter.
-- [ ] **The department filter matches loosely.** `DEPARTMENT_OPTIONS` are hard-coded names in `frontend/src/constants`, and the backend matches them with `ILIKE %name%`, so they can drift from the real `departments` table. Load departments from the API instead.
+## Features
 
-## 3. Missing backend endpoints
+- **Subjects:** list subjects with search, a department filter and pagination.
+- **Classes:** list classes with search and subject/teacher filters. Create a class with a banner image, capacity, status and teacher. View class details.
+- **Invite codes:** each class gets a unique invite code that students use to join.
+- **Image uploads:** class banners are uploaded straight from the browser to Cloudinary.
+- **Authentication:** email-and-password sign-up and sign-in through Better Auth, with three user roles: `admin`, `teacher` and `student`.
+- **API protection:** Arcjet provides shield (common attack protection), bot detection and rate limits that depend on the user's role.
+- **Monitoring:** Site24x7 APM Insight instruments the backend.
+- **Admin UI:** built on Refine, with data tables, forms validated with zod and react-hook-form, light and dark themes, and a command palette (Kbar).
 
-| Needed for | Endpoint | Status |
-|---|---|---|
-| Subjects → Create | `POST /api/subjects` | ❌ 404 |
-| Department list for forms and filters | `GET /api/departments` (and create) | ❌ 404 |
-| Class edit (the Edit button is already shown) | `PUT /api/classes/:id` | ❌ 404 |
-| Class delete | `DELETE /api/classes/:id` | ❌ 404 |
-| Join class with an invite code | `POST /api/enrollments` or `POST /api/classes/join` | ❌ 404 |
-| Class roster | `GET /api/classes/:id/enrollments` | ❌ 404 |
-| Subject and user detail, update and delete | `GET/PUT/DELETE /api/subjects/:id`, `/api/users/:id` | ❌ 404 |
+## Tech stack
 
-## 4. Bugs in existing backend code
-
-1. [ ] **`GET /api/classes/:id` has no `try/catch`** (`backend/src/routes/classes.ts`). On a DB error, Express returns an HTML page that includes the full SQL query. Wrap it in `try/catch` and return JSON.
-2. [ ] **`POST /api/classes` has no validation.** It spreads `req.body` straight into the insert. Any column can be set, invalid data reaches the DB, and on failure it returns the raw error object (`{ error: e }`). Validate with zod and pick only the allowed fields. Also, the invite code (`Math.random().toString(36).substring(2, 9)`) can collide with the unique constraint and isn't retried.
-3. [ ] **Rate limiting and bot protection never run on API routes.** `app.use(securityMiddleware)` is registered after the routers in `backend/src/index.ts`, so it only protects `GET /`. Ten rapid requests to `/api/*` were all served. Move it above the `app.use('/api/...')` lines.
-4. [ ] **The security middleware fails open.** When Arcjet errors (for example a missing IP), the request still proceeds. Decide on the intended behaviour.
-5. [ ] **`req.user` is never set,** so the role-based rate limits (admin, teacher, student) always fall back to the guest limit. Add a middleware that reads the Better Auth session and sets `req.user`.
-6. [ ] **The production build is broken:**
-   - `npm run build` fails with TypeScript errors. `tsconfig.json` uses `"moduleResolution": "node"`, which cannot resolve drizzle-orm's type exports. Use `"module": "NodeNext"` with `"moduleResolution": "NodeNext"` (or `"bundler"`).
-   - `npm start` runs `node dist/server.js`, but the entry file is `src/index.ts`, so the output is `dist/index.js`.
-7. [ ] **The port is hard-coded** (`const PORT = 8000`). Use `process.env.PORT ?? 8000` for deployment.
-
-## 5. Authentication and security
-
-- [ ] **No API route requires login.** `/api/users` returns every user's name and email to anyone.
-- [ ] **Anyone can register as an admin.** `role` is declared with `input: true` in `backend/src/lib/auth.ts`, so a sign-up request can set `"role": "admin"`. Allow only `student` and `teacher` at sign-up, and assign `admin` server-side.
-- [ ] **No route checks the user's role.** For example, nothing limits class creation to teachers and admins.
-- [ ] **The frontend has no auth wiring.** `sign-in-form.tsx`, `sign-up-form.tsx` and `forgot-password-form.tsx` exist, but nothing uses them yet:
-  - no `authProvider` is passed to `<Refine>`
-  - there is no Better Auth client (`createAuthClient`)
-  - there are no `/login`, `/register` or `/forgot-password` routes (they render blank pages)
-  - no route is protected (`<Authenticated>`)
-  - requests are not sent with `credentials: 'include'`
-- [ ] **Unused legacy settings.** `frontend/src/constants/index.ts` reads `VITE_API_URL`, `VITE_ACCESS_TOKEN_KEY` and `VITE_REFRESH_TOKEN_KEY` and builds a `REFRESH_TOKEN_URL`. None of these are set or used, so remove them or wire them up.
-
-## 6. Incomplete frontend pages and UI
-
-| Page | Issue |
+| Layer | Technology |
 |---|---|
-| Dashboard (`/`) | Placeholder: shows only the text "Dashboard". |
-| Subjects → Create (`/subjects/create`) | Placeholder: shows only the text "Create". No form, and no backend endpoint. |
-| Class details (`/classes/show/:id`) | The "Join Class" button does nothing. The header "Edit" button points to a route that doesn't exist. The invite code and schedules are never shown. |
-| Classes → List | The banner fallback `/placeholder-class.png` doesn't exist in `public/`. |
-| Classes → Create | No schedule input, although `schedules` is in the schema. The backend overwrites schedules with `[]` anyway. |
-| Users / Faculty | `facultySchema` exists, but there are no pages. |
-| Enrollments | `enrollmentSchema` exists, but there are no pages. |
-| `index.html` | The title and meta tags are still the Refine template defaults. |
+| Frontend framework | React 19, Vite 6, TypeScript |
+| Admin framework | Refine 5 (`@refinedev/core`, `@refinedev/rest`, `@refinedev/react-router`, `@refinedev/react-table`) |
+| UI | Tailwind CSS v4, shadcn/ui (Radix UI), lucide-react, sonner, Recharts |
+| Forms and validation | react-hook-form, zod |
+| Media | Cloudinary (`@cloudinary/react`) |
+| Backend | Node.js, Express 5, TypeScript (ESM), tsx |
+| Database | PostgreSQL on Neon (serverless HTTP driver) |
+| ORM and migrations | Drizzle ORM, drizzle-kit |
+| Auth | Better Auth (Drizzle adapter) |
+| Security | Arcjet (shield, bot detection, sliding-window rate limiting) |
+| Observability | Site24x7 APM Insight |
 
-**What works:** client-side validation on Classes → Create. Submitting the form empty shows an error for every field.
+## Architecture
 
-## 7. Type errors and code quality
+```
+┌──────────────────────────────┐        HTTPS / JSON         ┌───────────────────────────────┐
+│  Frontend  (frontend/)       │  ─────────────────────────▶ │  Backend API  (backend/)      │
+│  React + Vite + Refine       │   /api/subjects, /classes,  │  Express 5                    │
+│                              │   /users, /auth/*           │                               │
+│  • Pages (list/create/show)  │ ◀─────────────────────────  │  • CORS (FRONTEND_URL only)   │
+│  • REST data provider        │                             │  • Better Auth  /api/auth/*   │
+│    (src/providers/data.ts)   │                             │  • Route handlers             │
+│  • zod form schemas          │                             │  • Arcjet security middleware │
+└──────────────┬───────────────┘                             └───────────────┬───────────────┘
+               │ direct browser upload                                       │ Drizzle ORM
+               ▼                                                             ▼ (neon-http)
+       ┌───────────────┐                                           ┌───────────────────┐
+       │  Cloudinary   │   banner URL + public ID saved on class   │  Neon PostgreSQL  │
+       └───────────────┘                                           └───────────────────┘
+```
 
-- [ ] **The frontend has 3 TypeScript errors** (`npx tsc --noEmit`):
-  - `components/upload-widget.tsx`: the component props have no types. Use `UploadWidgetProps` from `@/types`.
-  - `pages/classes/create.tsx:129`: a consequence of the untyped `UploadWidget`.
-- [ ] **Frontend types don't match the backend:**
-  - `Subject.department` is typed as `string`, but the API returns a department object.
-  - `ClassDetails.status` is missing `'archived'`.
-  - `ClassDetails` declares `courseCode` and `courseName`, which the API never returns.
-- [ ] **`backend/src/routes/users.ts` doesn't validate `role`.** It passes the value to the enum with `as any`, so an invalid role becomes a DB error and a `500` instead of a `400`.
-- [ ] **Search terms aren't escaped.** The `search` value isn't escaped for `%` and `_` in `ILIKE` (the `subject`, `teacher` and `department` filters are).
-- [ ] **Unused constants.** The sample `teachers` and `subjects` arrays and `constants/mock-data.ts` can probably be removed.
-- [ ] **No tests.** The backend `npm test` script is a placeholder.
+**How a request flows**
 
-## 8. Running locally
+1. A Refine page calls a hook such as `useList({ resource: 'classes', filters })`.
+2. The REST data provider in `frontend/src/providers/data.ts` turns it into a request such as `GET {VITE_BACKEND_BASE_URL}classes?page=1&limit=10&search=…`.
+3. Express checks the origin against `FRONTEND_URL` (CORS) and sends the request to a router in `backend/src/routes/`.
+4. The router builds a Drizzle query, which runs on Neon over HTTPS, and returns `{ data, pagination }`.
+5. Refine caches the response and renders it in a data table or detail view.
 
-**Backend:**
+**Authentication:** Better Auth is mounted at `/api/auth/*`. It stores users, sessions and accounts in Postgres through the Drizzle adapter. The `user` table is extended with a `role` field (`student` by default) and an optional `imageCldPubId`.
+
+**Security:** the Arcjet middleware chooses a rate limit from the caller's role (admin 20/min, teacher and student 10/min, guest 5/min) and also applies shield and bot detection.
+
+## Data model
+
+```
+departments 1 ──── * subjects 1 ──── * classes * ──── 1 user (teacher)
+                                         │
+                                         * enrollments * ──── 1 user (student)
+```
+
+| Table | Key columns |
+|---|---|
+| `departments` | `id`, `code` (unique), `name`, `description` |
+| `subjects` | `id`, `department_id` → departments, `code` (unique), `name`, `description` |
+| `classes` | `id`, `subject_id` → subjects, `teacher_id` → user, `invite_code` (unique), `name`, `description`, `banner_url`, `banner_cld_pub_id`, `capacity` (default 50), `status` (`active` / `inactive` / `archived`), `schedules` (jsonb) |
+| `enrollments` | composite primary key (`student_id` → user, `class_id` → classes) |
+| `user`, `session`, `account`, `verification` | Better Auth tables. `user` has the extra columns `role` and `image_cld_pub_id` |
+
+Every app table has `created_at` and `updated_at` timestamps. The schema is defined in `backend/src/db/schema/`, and the migrations are in `backend/drizzle/`.
+
+## API reference
+
+Base URL: `http://localhost:8000/api`
+
+| Method | Endpoint | Description | Query parameters |
+|---|---|---|---|
+| `GET` | `/subjects` | Paginated list of subjects, with their departments | `search`, `department`, `page`, `limit` |
+| `GET` | `/classes` | Paginated list of classes, with their subjects and teachers | `search`, `subject`, `teacher`, `page`, `limit` |
+| `GET` | `/classes/:id` | Details of one class | — |
+| `POST` | `/classes` | Create a class (the invite code is generated) | — |
+| `GET` | `/users` | Paginated list of users | `search`, `role`, `page`, `limit` |
+| `*` | `/auth/*` | Better Auth endpoints (sign-up, sign-in, session, sign-out) | — |
+
+List responses use this shape:
+
+```json
+{
+  "data": [ ... ],
+  "pagination": { "page": 1, "limit": 10, "total": 42, "totalPages": 5 }
+}
+```
+
+The endpoints that are planned but not built yet (departments, enrollments, and class update and delete) are listed in [KNOWN_ISSUES.md](KNOWN_ISSUES.md#3-missing-backend-endpoints).
+
+## Project structure
+
+```
+class-room-full-system/
+├── README.md               # This file
+├── KNOWN_ISSUES.md         # Current bugs and remaining work
+├── backend/
+│   ├── drizzle/            # Generated SQL migrations and snapshots
+│   ├── drizzle.config.ts
+│   └── src/
+│       ├── index.ts        # Express app entry (CORS, auth, routers, middleware)
+│       ├── config/arcjet.ts
+│       ├── db/
+│       │   ├── index.ts    # Neon + Drizzle client
+│       │   └── schema/     # app.ts (domain tables), auth.ts (Better Auth tables)
+│       ├── lib/auth.ts     # Better Auth configuration
+│       ├── middleware/security.ts
+│       └── routes/         # classes.ts, subjects.ts, users.ts
+└── frontend/
+    ├── Dockerfile, vercel.json
+    └── src/
+        ├── App.tsx         # Refine setup, resources and routes
+        ├── providers/data.ts   # REST data provider
+        ├── pages/          # dashboard, subjects/*, classes/*
+        ├── components/
+        │   ├── refine-ui/  # Layout, data table, forms, buttons, views
+        │   ├── ui/         # shadcn/ui primitives
+        │   └── upload-widget.tsx  # Cloudinary upload
+        ├── lib/            # zod schemas, Cloudinary helpers, utils
+        ├── constants/      # Environment config and option lists
+        └── types/
+```
+
+## Getting started
+
+### Prerequisites
+
+- Node.js 20 or later, and npm
+- A [Neon](https://neon.tech) Postgres database
+- An [Arcjet](https://arcjet.com) key
+- A [Cloudinary](https://cloudinary.com) account with an unsigned upload preset
+
+### 1. Clone
+
+```bash
+git clone https://github.com/nelsonhano/class-room-full-system.git
+cd class-room-full-system
+```
+
+### 2. Backend
+
 ```bash
 cd backend
 npm install
-# backend/.env needs: DATABASE_URL (Neon), BETTER_AUTH_SECRET, ARCJET_KEY, ARCJET_ENV=development, FRONTEND_URL=http://localhost:5173
+# create backend/.env (see Environment variables)
 npm run db:migrate
-npm run dev          # http://localhost:8000
+npm run dev            # http://localhost:8000
 ```
 
-**Frontend:**
+### 3. Frontend
+
 ```bash
 cd frontend
 npm install
-# frontend/.env needs: VITE_BACKEND_BASE_URL=http://localhost:8000/api/, VITE_CLOUDINARY_CLOUD_NAME, VITE_CLOUDINARY_UPLOAD_PRESET, VITE_CLOUDINARY_UPLOAD_URL
-npm run dev          # http://localhost:5173
+# create frontend/.env (see Environment variables)
+npm run dev            # http://localhost:5173
 ```
 
-> If the frontend shows a Tailwind/PostCSS error overlay, apply the `vite.config.ts` fix in section 1.
+> If the frontend shows a Tailwind or PostCSS error overlay, the fix is described in [KNOWN_ISSUES.md](KNOWN_ISSUES.md#1-blockers-nothing-works-end-to-end-until-these-are-fixed).
 
-## Suggested order of work
+## Environment variables
 
-1. Fix the blockers in section 1, then run the migrations and seed a few departments, subjects and users.
-2. Fix the communication bugs in section 2 and the existing-code bugs in section 4.
-3. Wire up authentication and roles (section 5).
-4. Build the missing endpoints (section 3) together with their pages (section 6).
-5. Clean up types and add tests (section 7).
+**`backend/.env`**
+
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | Neon Postgres connection string |
+| `BETTER_AUTH_SECRET` | Random secret Better Auth uses to sign sessions |
+| `FRONTEND_URL` | Frontend origin for CORS and trusted origins, for example `http://localhost:5173` |
+| `ARCJET_KEY` | Arcjet site key |
+| `ARCJET_ENV` | Set to `development` for local development |
+
+The backend also reads `backend/apminsightnode.json` for the Site24x7 APM license. This file is gitignored, so create it yourself if you use APM.
+
+**`frontend/.env`**
+
+| Variable | Description |
+|---|---|
+| `VITE_BACKEND_BASE_URL` | API base URL, for example `http://localhost:8000/api/` (keep the trailing slash) |
+| `VITE_CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name |
+| `VITE_CLOUDINARY_UPLOAD_PRESET` | Unsigned upload preset |
+| `VITE_CLOUDINARY_UPLOAD_URL` | Cloudinary upload endpoint |
+
+## Scripts
+
+| Location | Command | What it does |
+|---|---|---|
+| `backend/` | `npm run dev` | Start the API with hot reload (tsx watch) |
+| `backend/` | `npm run build` | Compile TypeScript to `dist/` |
+| `backend/` | `npm run db:generate` | Generate a migration from schema changes |
+| `backend/` | `npm run db:migrate` | Apply migrations to the database |
+| `frontend/` | `npm run dev` | Start the Vite dev server |
+| `frontend/` | `npm run build` | Build the production bundle |
+| `frontend/` | `npm run start` | Serve the production build |
+
+## Deployment
+
+- **Frontend:** `frontend/vercel.json` rewrites every route to `index.html` so client-side routing works on Vercel. You can also use `frontend/Dockerfile`, which builds the app and serves it with `serve`.
+- **Backend:** any Node host works, for example Render, Railway or Fly. Set the backend environment variables there. Before deploying, apply the build and port fixes listed in [KNOWN_ISSUES.md](KNOWN_ISSUES.md#4-bugs-in-existing-backend-code).
+
+## Roadmap
+
+- Department, enrollment and class edit/delete endpoints, with their pages
+- Sign-in, sign-up and protected routes in the frontend, plus role-based access control on the API
+- A dashboard with statistics and charts
+- Pages for faculty, users and enrollments
+- Tests for the backend and the frontend
+
+The detailed, prioritized list is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
